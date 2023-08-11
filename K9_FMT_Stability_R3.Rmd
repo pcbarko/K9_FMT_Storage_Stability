@@ -1,0 +1,1307 @@
+---
+title: "Stability of Fecal Samples Prepared for FMT During Storage at -80C and -20C"
+author: "Patrick Barko"
+date: "`r Sys.Date()`"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = F, message=FALSE, warning=FALSE)
+
+library(phyloseq)
+library(ggplot2)
+library(DESeq2)
+library(tidyverse)
+library(kableExtra)
+library(ggpubr)
+library(microbiome)
+library(dplyr)
+library(vegan)
+library(picante)
+library(lme4)
+library(lmerTest)
+library(emmeans)
+library(edgeR)
+library(Glimma)
+library(gplots)
+library(statmod)
+library(scales)
+library(gridExtra)
+library(grid)
+library(pheatmap)
+library(ggforce)
+library(Rmisc)
+library(reshape2)
+library(tidyr)
+library(rmcorr)
+library(WGCNA)
+library(rstatix)
+library(Maaslin2)
+library(microbiomeMarker)
+library(decontam)
+
+```
+
+# **Load Data**
+
+A phyloseq object containing the ASV table, taxonomic annotation, sample metadata, and reference sequences are loaded into this session
+
+```{r, eval=F}
+physeq <- readRDS("K9_FMT_Stability_physeq_R2.RDS")
+
+physeq
+```
+
+
+```{r, eval=F}
+sam_data(physeq)$name[c(33:36, 122:126)] <- "Dog_2"
+```
+
+```{r, eval=F}
+
+sub(".*?_", "name_", rownames(sample_data(physeq)))
+
+rows <- rownames(sample_data(physeq))[-c(1, 24:28, 65:66, 71 )]
+
+# sub(".*?_", 
+#     paste(sample_data(physeq)$name[-c(1, 24:28, 65:66, 71 )], "_",sep = ""), 
+#     rownames(sample_data(physeq))[-c(1, 24:28, 65:66, 71 )])
+
+rows <- data.frame(rows, sample_data(physeq)$name[-c(1, 24:28, 65:66, 71 )])
+
+names(rows) <- c("ID", "name")
+
+# for(i in 1:nrow(rows)){
+#   print(rows$ID[i])
+#   print(rows$name[i])
+# }
+
+newID <- NULL
+
+for(i in 1:nrow(rows)){
+  new <- sub(
+    ".*?_", 
+    paste(rows$name[i], "_",sep = ""), 
+    rows$ID[i])
+  
+  newID <- rbind(newID, new)
+}
+
+rows$newID <- as.character(newID)
+
+#table(rows$newID)
+
+#duplicated(rows$newID)
+
+#rows$newID[c(27:30, 113:117)]
+
+rownames(rows) <- rows$newID
+
+```
+
+```{r, eval=F}
+SAM <- sample_data(physeq)
+
+rownames(SAM)[-c(1, 24:28, 65:66, 71 )] <- newID[, 1]
+
+SAM$ID <- rownames(SAM)
+```
+
+
+```{r, eval=F}
+OTU <- as.data.frame(otu_table(physeq))
+
+rownames(OTU)[-c(1, 24:28, 65:66, 71 )] <- newID[, 1]
+```
+
+
+
+```{r, eval=F}
+
+rownames(sample_data(physeq))[-c(1, 24:28, 65:66, 71 )] <- newID[,1]
+
+samdata <- sam_data(physeq)
+
+```
+
+```{r, eval=F}
+TAX <- tax_table(physeq)
+```
+
+
+```{r, eval=F}
+
+OTU <- otu_table(OTU, taxa_are_rows = F)
+
+SAM <- sample_data(SAM)
+
+TAX <- tax_table(physeq)
+
+physeq2 <- phyloseq(OTU, SAM, TAX)
+
+saveRDS(physeq2, "K9_FMT_Stability_physeq_R3.RDS")
+
+```
+
+```{r}
+physeq <- readRDS("K9_FMT_Stability_physeq_R3.RDS")
+```
+
+
+```{r}
+taxa <- data.frame(tax_table(physeq))
+
+samdata <- sam_data(physeq)
+
+```
+
+# **Preliminary Examination and Processing of Phyloseq Object**
+
+**Distribution of ASV's by Phylum:**
+
+```{r}
+table(tax_table(physeq)[,'Phylum'])
+```
+
+There were 346 ASVs with unclassified phyla. ASVs that are not assigned to a Phylum are removed. 
+
+```{r}
+physeq <- subset_taxa(physeq, Phylum != "Unclassified")
+
+table(tax_table(physeq)[,'Phylum'])
+
+```
+
+**Singletons (ASV's with Only a Single Read):**
+
+```{r}
+summarize_phyloseq(physeq)[[7]][1]
+```
+
+Singletons are expected in these data. 
+
+**How Sparse (Proportion of Zero Counts) is this Dataset?**
+
+```{r}
+summarize_phyloseq(physeq)[[6]][1]
+```
+
+A high degree of sparsity is expected in these data.
+
+**Number of Reads per ASV:**
+
+```{r}
+hist(log2(taxa_sums(physeq)), 1000, 
+     main = "Histogram: Reads per ASV", 
+     xlab = "log2(taxa sums)")
+```
+
+As expected, the distribution of counts per ASV shows that most ASVs have a low count (rare ASVs) and the data is zero-inflated (sparse).
+
+**Sequencing Depth:**
+
+I will calculate the number of sequences per sample to understand whether we achieved relatively even sequencing depth. 
+
+```{r}
+
+SeqDepth <- rowSums(otu_table(physeq))
+sample_data(physeq)$SeqDepth <- SeqDepth
+
+seqDepth_df <- data.frame(sample_data(physeq))
+
+#seqDepth_df <- seqDepth_df[, c(1:2, 21)]
+
+#str(seqDepth_df)
+
+hist(sample_data(physeq)$SeqDepth, 
+     main = "Reads per Sample for Combined Dataset", 
+     xlab = "Number of Reads")
+```
+
+# **Decontamination**
+
+```{r}
+sample_data(physeq)$Sample_or_Control <- NA
+
+sample_data(physeq)$Sample_or_Control <- ifelse(
+  sample_data(physeq)$name == "PBS", 
+  "Control Sample",
+  "True Sample"
+  )
+
+sample_data(physeq)$Sample_or_Control <- ifelse(
+  sample_data(physeq)$name == "20% glycerol in PBS", 
+  "Control Sample",
+  sample_data(physeq)$Sample_or_Control
+  )
+
+sample_data(physeq)$Sample_or_Control <- ifelse(
+  sample_data(physeq)$name == "H20", 
+  "Control Sample",
+  sample_data(physeq)$Sample_or_Control
+  )
+  
+```
+
+
+```{r}
+samdata2 <- as.data.frame(sample_data(physeq)) # Put sample_data into a ggplot-friendly data.frame
+
+samdata2$LibrarySize <- sample_sums(physeq)
+
+samdata2 <- samdata2[order(samdata2$LibrarySize),]
+
+samdata2$Index <- seq(nrow(samdata2))
+
+ggplot(data=samdata2, aes(x=Index, y=LibrarySize, color=Sample_or_Control)) + 
+  geom_point()
+```
+
+Using the relatively liberal default decontamination setting:
+
+```{r}
+sample_data(physeq)$is.neg <- sample_data(physeq)$Sample_or_Control == "Control Sample"
+
+contamdf.prev <- isContaminant(physeq, method="prevalence", neg="is.neg")
+
+table(contamdf.prev$contaminant)
+```
+
+Using a more conservative decontamination setting:
+
+```{r}
+contamdf.prev05 <- isContaminant(physeq, method="prevalence", neg="is.neg", threshold=0.5)
+
+table(contamdf.prev05$contaminant)
+```
+
+**Identify contaminating sequences:**
+
+```{r}
+
+badTaxa <- rownames(contamdf.prev05)[contamdf.prev05$contaminant == "TRUE"]
+
+taxa_contam <- taxa[rownames(taxa) %in% badTaxa, ]
+
+taxa_contam$GS
+
+```
+
+**Remove contaminating sequences:**
+
+```{r}
+
+allTaxa <-taxa_names(physeq)
+
+myTaxa <- allTaxa[!(allTaxa %in% badTaxa)]
+
+physeq_decontam <- prune_taxa(myTaxa, physeq)
+```
+
+## **Filtering for Prevalence and Abundance**
+
+Low-abundance taxa and those identified in a small number of samples will be removed. We are not likely to generate any statistically valid results from these data. 
+
+For filtering parameters, ASVs that with < 1 total count (will eliminate singletons) and not present in at least 5% of samples.
+
+```{r, include=F}
+
+filter <- phyloseq::genefilter_sample(physeq_decontam, filterfun_sample(function(x) x >= 1), 
+                                       A = 0.05*nsamples(physeq_decontam))
+
+physeq_filt <- prune_taxa(filter, physeq_decontam)
+
+```
+
+How many taxa did we lose? Let's compare the original dataset with the filtered data:
+
+Filtered Data:
+
+```{r}
+physeq_filt
+```
+
+How many ASVs did we lose?
+
+```{r}
+ntaxa(physeq) - ntaxa(physeq_filt)
+```
+
+## **Agglomeration**
+
+Agglomeration performed at the species level.
+
+```{r}
+physeq_filt_glom <- tax_glom(physeq_filt, "Species")
+  
+```
+
+Filtered and Agglomerated Data:
+
+```{r}
+physeq_filt_glom
+```
+
+How many totals ASVs did we lose with filtering and agglomeration?
+
+```{r}
+ntaxa(physeq) - ntaxa(physeq_filt_glom)
+```
+
+```{r}
+table(tax_table(physeq_filt_glom)[,'Phylum'])
+```
+
+```{r}
+
+taxa_filt <- data.frame(tax_table(physeq_filt))
+taxa_glom <- data.frame(tax_table(physeq_filt_glom))
+```
+
+
+## **Create Separate Object for Control Samples**
+
+```{r}
+
+
+physeq_controls <- subset_samples(physeq, is.na(Time))
+
+
+physeq_filt <- subset_samples(physeq_filt, !is.na(Time))
+
+
+```
+
+
+```{r}
+
+physeq_filt_glom <- subset_samples(physeq_filt_glom, !is.na(Time))
+
+
+```
+
+
+**FMT Samples:**
+
+```{r, echo=FALSE, fig.align="center"}
+
+bp <- ggbarplot(meta(physeq_filt), "ID", "SeqDepth", fill = "name", 
+                xlab = "Samples",
+                ylab = "Sequence Counts") 
+
+bp + ggtitle("Barplot of Sequencing Depth per Sample (FMT Samples)") + 
+  theme(axis.text.x = element_blank()) +
+  theme(legend.position="none") + geom_hline(yintercept = 10000)
+
+```
+
+```{r}
+summary(sample_data(physeq_filt)$SeqDepth)
+```
+
+Nearly all FMT samples have >10k reads in the filtered data. This is evidence of sufficient sequencing depth in the FMT samples.
+
+# **Analysis of Negative and Lysis Control Samples**
+
+## **Negative Controls**
+
+```{r}
+physeq_neg_controls <- subset_samples(physeq_controls, name == "20% glycerol in PBS" | name == "H20" | name == "PBS")
+  
+controls_ra <- transform_sample_counts(physeq_controls, function(x) x/sum(x))
+
+controls_ra_neg <- subset_samples(controls_ra, name == "20% glycerol in PBS" | name == "H20" | name == "PBS")
+
+physeq_neg_controls <- filter_taxa(physeq_neg_controls, function(x) sum(x) > 0, TRUE)
+
+physeq_neg_controls_ra <- transform_sample_counts(physeq_neg_controls, function(x) x/sum(x))
+
+```
+
+How many sequences were detected in the negative controls?
+
+```{r}
+
+#sam_data(controls_ra_neg)
+summary(sample_data(physeq_neg_controls)$SeqDepth)
+
+sum(taxa_sums(physeq_neg_controls))
+```
+
+Only 158 total sequences were detected in the negative reagent controls. The contaminating sequences were previously removed. 
+
+
+## **Lysis/PMA Controls**
+
+```{r}
+controls_ra_lysis <- subset_samples(controls_ra, name == "Freeze thaw + DMSO" 
+                                    | name == "Freeze thaw + PMA" 
+                                    | name == "heat + DMSO" 
+                                    | name == "heat + PMA"
+                                    | name == "No Lysis + DMSO"
+                                    | name == "No Lysis + PMA")
+
+```
+
+How many sequences were detected in the lysis controls:
+
+```{r}
+summary(sample_data(controls_ra_lysis)$SeqDepth)
+```
+
+### **Ordination**
+
+```{r, include=F, warning=F, message=F}
+
+dist = "bray"
+
+ord_meths = c("NMDS", "PCoA")
+
+plist = llply(as.list(ord_meths), function(i, controls_ra_lysis, dist){
+        ordi = ordinate(controls_ra_lysis, method=i, distance=dist)
+        plot_ordination(controls_ra_lysis, ordi, "samples", color="name")
+        }, controls_ra_lysis, dist)
+
+names(plist) <- ord_meths
+
+pdataframe = ldply(plist, function(x){
+    df = x$data[, 1:2]
+    colnames(df) = c("Axis_1", "Axis_2")
+    return(cbind(df, x$data))
+})
+
+names(pdataframe)[1] = "method"
+
+```
+
+```{r}
+p = ggplot(pdataframe, aes(Axis_1, Axis_2, color=name))
+p = p + geom_point(size=3) 
+p = p + facet_wrap(~method, scales="free")
+p + geom_text(aes(label=as.character(Time)), hjust = 2, size=2) +
+  ggtitle("Bray-Curtis: Lysis Control Samples")
+```
+
+### **Taxonomy**
+
+Which features were detected in the lysis controls?
+
+```{r}
+phyloseq::plot_bar(controls_ra_lysis) + 
+  geom_bar(aes(fill=Phylum), stat="identity", position="stack") +
+  ggtitle("Feature Relative Abundance by Phylum (Lysis Controls)")
+
+```
+
+# **Analysis of FMT Samples**
+
+## **Ordination**
+
+```{r, include=F, warning=F, message=F}
+physeq.ord <- transform_sample_counts(physeq_filt, function(x) x/sum(x))
+
+#t <- data.frame(otu_table(physeq.ord))
+
+#physeq.ord <- physeq_filt_glom
+
+dist = "bray"
+
+ord_meths = c("NMDS", "PCoA")
+
+plist = llply(as.list(ord_meths), function(i, physeq.ord, dist){
+        ordi = ordinate(physeq.ord, method=i, distance=dist)
+        plot_ordination(physeq.ord, ordi, "samples", color="name")
+}, physeq.ord, dist)
+
+names(plist) <- ord_meths
+
+pdataframe = ldply(plist, function(x){
+    df = x$data[, 1:2]
+    colnames(df) = c("Axis_1", "Axis_2")
+    return(cbind(df, x$data))
+})
+
+names(pdataframe)[1] = "method"
+
+```
+
+```{r}
+p = ggplot(pdataframe, aes(Axis_1, Axis_2, color=name))
+p = p + geom_point(size=3) 
+p = p + facet_wrap(~method, scales="free")
+p + geom_text(aes(label=as.character(Time)), hjust = 2, size=2) +
+  ggtitle("Bray-Curtis")
+```
+
+```{r}
+p = ggplot(pdataframe, aes(Axis_1, Axis_2, color=Temperature, shape=Time))
+
+p = p + geom_point(size=3) 
+p + facet_wrap(~method, scales="free") + ggtitle("Bray-Curtis")
+```
+For publication, we will use the NMDS
+
+```{r}
+nmds_time_temp <- ggplot(data = pdataframe[pdataframe$method == "NMDS", ], 
+       aes(Axis_1, Axis_2, color=Temperature, shape=Time)) +
+  geom_point(size=3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_vline(xintercept = 0, lty = 2) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), 
+        panel.border = element_rect(fill= "transparent")) +
+  theme(legend.position="right") + 
+  theme(legend.title=element_text(size=14), 
+    legend.text=element_text(size=12))
+```
+
+
+```{r}
+nmds_ind <- ggplot(data = pdataframe[pdataframe$method == "NMDS", ], 
+       aes(Axis_1, Axis_2, color=name)) +
+  geom_point(size=3) +
+  geom_hline(yintercept = 0, lty = 2) +
+  geom_vline(xintercept = 0, lty = 2) +
+  theme_minimal() +
+  theme(panel.grid = element_blank(), 
+        panel.border = element_rect(fill= "transparent")) +
+  theme(legend.title=element_text(size=14), 
+    legend.text=element_text(size=12))
+```
+
+**PERMANOVA**
+
+Individual dog effect:
+
+```{r}
+
+#Calculate distance and save as a matrix
+
+BC.dist <- phyloseq::distance(physeq.ord, method="bray")
+
+sam <- data.frame(sample_data(physeq.ord))
+
+#Run PERMANOVA on distances.
+with(sam, adonis2(BC.dist ~ name, data = sam, permutations = 1000))
+
+```
+
+Effects of time and temperature:
+```{r}
+#Run PERMANOVA on distances.
+with(sam, adonis2(BC.dist ~ Time*Temperature, data = sam, permutations = 1000, strata = name))
+
+```
+
+Significant effects on beta diversity among individual dogs and for the Time and Temperature conditions, but not the interaction between them.
+
+
+```{r}
+
+groups <- sample_data(physeq.ord)
+
+dist_ind <- vegdist(otu_table(physeq.ord),method="bray")
+
+bd <- betadisper(dist_ind, groups$name, type = "centroid")
+
+bd
+
+```
+
+
+```{r}
+
+summary(bd$distances)
+
+
+```
+
+
+```{r}
+
+boxplot(bd, las=2, xlab = "")
+abline(h=mean(bd$distances), col="red")
+
+bd$group
+
+plot(bd, hull = FALSE, ellipse = TRUE, label.cex = 0.4)
+
+
+```
+
+```{r}
+
+anova(bd)
+
+beta_disp_tukey <- data.frame(TukeyHSD(bd)$group)
+
+beta_disp_tukey <- cbind(beta_disp_tukey, do.call(rbind, str_split(rownames(beta_disp_tukey), "-")))
+
+beta_disp_tukey <- beta_disp_tukey[, c(5:6, 1:4)]
+
+names(beta_disp_tukey)[1:2] <- c("Group 1", "Group 2")
+
+write.csv(beta_disp_tukey, file = "betaDispersion_TukeyHSD.csv")
+
+beta_disp_tukey <- beta_disp_tukey[beta_disp_tukey$p.adj<0.05, ]
+
+
+```
+
+```{r}
+group_dist <- data.frame(bd$group.distances)
+
+group_dist$BetaDispersion <- ifelse(group_dist$bd.group.distances < 0.167, "Low Dispersion", "High Dispersion")
+
+table(group_dist$BetaDispersion)
+```
+
+
+# **Alpha Diversity** 
+
+## **Examine Various Alpha Diversity Indices**
+
+```{r}
+
+plot_richness(subset_samples(physeq, !is.na(Time)), color = "Temperature", measures = "Shannon") + 
+  facet_grid(~Time) + 
+  labs(y = "Shannon Diversity Index") +
+  ggtitle("Alpha Diversity: Shannon Index by Timepoint")+
+  theme(axis.text.x = element_blank())
+
+plot_richness(subset_samples(physeq, !is.na(Time)), color = "Temperature", measures = "Observed") + 
+  facet_grid(~Time) + 
+  labs(y = "Observed Species Index") +
+  ggtitle("Alpha Diversity: Observed Species Index by Timepoint") +
+  theme(axis.text.x = element_blank())
+
+plot_richness(subset_samples(physeq, !is.na(Time)), color = "Temperature", measures = "Chao1") + 
+  facet_grid(~Time) + 
+  labs(y = "Chao1 Index") +
+  ggtitle("Alpha Diversity: Chao1 Index by Timepoint") +
+  theme(axis.text.x = element_blank())
+
+plot_richness(subset_samples(physeq, !is.na(Time)), color = "Temperature", measures = "InvSimpson") + 
+  facet_grid(~Time) + 
+  labs(y = "Inverse Simpson Index") +
+  ggtitle("Alpha Diversity: Inverse Simpson Index by Timepoint") +
+  theme(axis.text.x = element_blank())
+
+```
+
+
+## **Linear Mixed Effects Models: Shannon Diversity Index**
+
+```{r}
+alpha <-estimate_richness(subset_samples(physeq, !is.na(Time)), measures = c("Shannon", "Observed"))
+
+alpha <- cbind(alpha, samdata[!is.na(samdata$Time), ])
+
+alpha$name <- factor(alpha$name)
+
+alpha$Time <- factor(alpha$Time, levels = c("0", "3", "6", "9", "12"))
+
+
+
+alpha$Temperature <- factor(alpha$Temperature, levels = c( "Fresh","-20C", "-80C"))
+
+write.csv(alpha, file = "FMTStability_alpha.csv")
+
+
+```
+
+Linear mixed effects model of shannon diversity with time and temperatures as fixed effects and dog ID as a random effect:
+
+```{r}
+
+model_shannon <- lmer(formula = Shannon ~ Time*Temperature + (1|name),
+              data = alpha)
+
+summary(model_shannon)
+```
+
+Residuals Plot:
+
+```{r}
+#residuals plot
+qqnorm(residuals(model_shannon))
+
+```
+The residuals appear approximately normal
+
+**Pairwise comparisons:**
+
+```{r}
+
+#pairwise comparisons
+emm_shannon <- emmeans(model_shannon, pairwise ~ Time | Temperature)
+
+summary(emm_shannon, adjust = "fdr")
+
+emm_shannon2 <- emmeans(model_shannon, pairwise ~ Temperature | Time)
+
+summary(emm_shannon2, adjust = "fdr")
+
+write.csv(data.frame(summary(emm_shannon2, adjust = "fdr")), file = "FMT_stability_shannon_emmeans1")
+
+write.csv(data.frame(summary(emm_shannon, adjust = "fdr")$contrasts), file = "FMT_stability_shannon_emmeans2")
+
+```
+
+There are no significant differences among different time points when controlling for temperature. Shannon diversity was significantly higher in samples stored at -80C at all timepoints compared with samples stored at -20C. 
+
+
+```{r}
+
+shannon_plot <- ggboxplot(alpha, x = "Time", y = "Shannon", 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) + 
+  labs(fill = "Temperature", x= "", y = "Shannon Diversity Index") +
+  theme(legend.position="bottom") + ggtitle("Shannon Diversity of Unfiltered Feature Matrix")
+
+pdf("FMT_Stability_SDI.pdf", onefile = TRUE)
+ggboxplot(alpha, x = "Time", y = "Shannon", 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) + 
+  labs(fill = "Temperature", x= "", y = "Shannon Diversity Index") +
+  theme(legend.position="bottom") + ggtitle("Shannon Diversity of Unfiltered Feature Matrix")
+dev.off()
+```
+
+Storage at -80C appears to maintain alpha diversity compared with storage at -20C.
+
+
+## **Linear Mixed Effects Models: Observed Species Index**
+
+```{r}
+obs <-estimate_richness(subset_samples(physeq, !is.na(Time)), measures = "Observed")
+
+obs <- cbind(obs, samdata[!is.na(samdata$Time), ])
+
+obs$name <- factor(obs$name)
+
+obs$Time <- factor(obs$Time, levels = c("0", "3", "6", "9", "12"))
+
+obs$Temperature <- factor(obs$Temperature, levels = c("-20C", "-80C"))
+```
+
+Linear mixed effects model of shannon diversity with time and temperatures as fixed effects and dog ID as a random effect:
+
+```{r}
+
+model_obs <- lmer(formula = Observed ~ Time*Temperature + (1|name),
+              data = obs)
+```
+
+Residuals Plot:
+
+```{r}
+#residuals plot
+qqnorm(residuals(model_obs))
+
+```
+The residuals appear approximately normal
+
+**Pairwise comparisons:**
+
+```{r}
+
+#pairwise comparisons
+emm_obs <- emmeans(model_obs, pairwise ~ Time | Temperature)
+
+summary(emm_obs, adjust = "fdr")
+
+emm_obs2 <- emmeans(model_obs, pairwise ~ Temperature | Time)
+
+summary(emm_obs2, adjust = "fdr")
+
+
+```
+
+There are no significant differences among different time points when controlling for temperature. Shannon diversity was significantly higher in samples stored at -80C at all timepoints compared with samples stored at -20C. 
+
+
+```{r}
+
+ggboxplot(obs, x = "Time", y = "Observed", 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) + 
+  labs(fill = "Temperature", x= "", y = "Observed Species Index") +
+  theme(legend.position="bottom") + ggtitle("Observed Species in Unfiltered Feature Matrix")
+
+pdf("FMT_Stability_SDI.pdf", onefile = TRUE)
+ggboxplot(obs, x = "Time", y = "Observed", 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) + 
+  labs(fill = "Temperature", x= "", y = "Observed Species Index") +
+  theme(legend.position="bottom") + ggtitle("Observed Species in Unfiltered Feature Matrix")
+dev.off()
+```
+
+
+## **Comparing Alpha Diversity between Fresh Fecal Samples with Low and High Beta Dispersion**
+
+```{r}
+alpha2 <-estimate_richness(subset_samples(physeq, Temperature == "Fresh" & !is.na(Time)), measures = c("Shannon", "Observed"))
+
+alpha2$name <- sam$name[match(rownames(alpha2), rownames(sam))]
+
+alpha2$BetaDispersion <- group_dist$BetaDispersion[match(alpha2$name, rownames(group_dist))]
+
+```
+
+
+### **Shannon Diversity**
+
+```{r}
+hist(alpha2$Shannon)
+
+shapiro.test(alpha2$Shannon)
+
+wilcox.test(alpha2$Shannon ~ alpha2$BetaDispersion)
+
+ggboxplot(alpha2, x = "BetaDispersion", y = "Shannon", 
+                   fill = "BetaDispersion") + 
+  labs(fill = "BetaDispersion", x= "", y = "Shannon Diversity Index") +
+  theme(legend.position="bottom") + ggtitle("Shannon Diversity of Unfiltered Feature Matrix")
+
+
+```
+
+### **Observed Species**
+
+```{r}
+hist(alpha2$Observed)
+
+shapiro.test(alpha2$Observed)
+
+wilcox.test(alpha2$Observed ~ alpha2$BetaDispersion)
+
+ggboxplot(alpha2, x = "BetaDispersion", y = "Observed", 
+                   fill = "BetaDispersion") + 
+  labs(fill = "BetaDispersion", x= "", y = "Observed Species") +
+  theme(legend.position="bottom") + ggtitle("Shannon Diversity of Unfiltered Feature Matrix")
+
+
+```
+
+# **Differential Abundance- Maaslin2**
+
+The filtered, agglomerated data was converted to relative abundance and AST transformed. The fixed effects were Storage temperature and time and the random effect was the dog ID. 
+
+```{r, include=F}
+#asv_maaslin <- transform_sample_counts(physeq_filt_glom, function(x) x/sum(x))
+
+asv_maaslin <- data.frame(otu_table(physeq_filt_glom), check.names = F)
+
+sam_maaslin <- data.frame(sam_data(physeq_filt_glom))
+
+#samdata <- sam[, c(2, 8, 10)]
+
+sam_maaslin$Time <- case_when(sam_maaslin$Time == "0" ~ "month_0",
+                          sam_maaslin$Time == "3" ~ "month_3",
+                          sam_maaslin$Time == "6" ~ "month_6",
+                          sam_maaslin$Time == "9" ~ "month_9",
+                          sam_maaslin$Time == "12" ~ "month_12"
+                          )
+
+sam_maaslin$Time <- factor(sam_maaslin$Time, levels = c("month_0", 
+                                                        "month_3", 
+                                                        "month_6", 
+                                                        "month_9", 
+                                                        "month_12"))
+
+levels(sam_maaslin$Time)
+
+sam_maaslin$Temperature <- case_when(sam_maaslin$Temperature == "-20C" ~ "minus_20C",
+                                 sam_maaslin$Temperature == "-80C" ~ "minus_80C",
+                                 sam_maaslin$Temperature == "Fresh" ~ "Fresh")
+
+sam_maaslin$Temperature <- factor(sam_maaslin$Temperature, levels = c("Fresh", "minus_80C", "minus_20C"))
+
+levels(sam_maaslin$Temperature)
+
+
+```
+
+```{r, eval=F}
+
+maaslin_tempFresh_t0 <- Maaslin2(
+  input_data = asv_maaslin, 
+  input_metadata = sam_maaslin, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_1", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Temperature,Fresh;Time,month_0")
+  )
+
+res_maaslin <- data.frame(maaslin_tempFresh_t0$results, check.names = F)
+res_maaslin$feature <- gsub("X", "", res_maaslin$feature)
+
+
+```
+
+```{r, eval=F}
+
+maaslin_tempFresh_t3 <- Maaslin2(
+  input_data = asv_maaslin, 
+  input_metadata = sam_maaslin, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_2", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Time,month_3;Temperature,Fresh")
+  )
+
+res_maaslin2 <- data.frame(maaslin_tempFresh_t3$results, check.names = F)
+res_maaslin2$feature <- gsub("X", "", res_maaslin2$feature)
+
+
+```
+
+```{r, eval=F}
+
+maaslin_tempFresh_t6 <- Maaslin2(
+  input_data = asv_maaslin, 
+  input_metadata = sam_maaslin, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_2", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Time,month_6;Temperature,Fresh")
+  )
+
+res_maaslin3 <- data.frame(maaslin_tempFresh_t6$results, check.names = F)
+res_maaslin3$feature <- gsub("X", "", res_maaslin3$feature)
+
+
+```
+
+```{r, eval=F}
+
+maaslin_tempFresh_t9 <- Maaslin2(
+  input_data = asv_maaslin, 
+  input_metadata = sam_maaslin, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_2", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Time,month_9;Temperature,Fresh")
+  )
+
+res_maaslin4 <- data.frame(maaslin_tempFresh_t9$results, check.names = F)
+res_maaslin4$feature <- gsub("X", "", res_maaslin4$feature)
+
+
+```
+
+```{r, eval=F}
+
+maaslin_tempFresh_t12 <- Maaslin2(
+  input_data = asv_maaslin, 
+  input_metadata = sam_maaslin, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_2", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Time,month_12;Temperature,Fresh")
+  )
+
+res_maaslin5 <- data.frame(maaslin_tempFresh_t12$results, check.names = F)
+res_maaslin5$feature <- gsub("X", "", res_maaslin5$feature)
+
+```
+
+```{r, eval=F}
+res_maaslin_t0 <- res_maaslin[res_maaslin$metadata == "Time", ]
+res_maaslin_t0$reference <- "month_0"
+
+res_maaslin_t3 <- res_maaslin2[res_maaslin2$metadata == "Time", ]
+res_maaslin_t3$reference <- "month_3"
+
+res_maaslin_t6 <- res_maaslin3[res_maaslin3$metadata == "Time", ]
+res_maaslin_t6$reference <- "month_6"
+
+res_maaslin_t9 <- res_maaslin4[res_maaslin4$metadata == "Time", ]
+res_maaslin_t9$reference <- "month_9"
+
+res_maaslin_t12 <- res_maaslin5[res_maaslin5$metadata == "Time", ]
+res_maaslin_t12$reference <- "month_12"
+
+maaslin_res_time <- rbind(res_maaslin_t0, res_maaslin_t3, res_maaslin_t6, res_maaslin_t9, res_maaslin_t12)
+
+maaslin_res_time$Phylum <- taxa$Phylum[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$Class <- taxa$Class[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$Order <- taxa$Order[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$Family <- taxa$Family[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$Genus <- taxa$Genus[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$Species <- taxa$Species[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$GS <- taxa$GS[match(maaslin_res_time$feature, rownames(taxa))]
+maaslin_res_time$SubSpecies <- taxa$Subspecies[match(maaslin_res_time$feature, rownames(taxa))]
+
+maaslin_res_time <- maaslin_res_time[, c(1:2, 11, 3:6, 8, 9:10, 12:19)]
+
+#there are duplicate rows, index on pval and remove
+maaslin_res_time$pval <- round(maaslin_res_time$pval, 10)
+
+maaslin_res_time <- maaslin_res_time[!duplicated(maaslin_res_time$pval), ]
+
+
+```
+
+## **Storage Time**
+
+```{r, eval=F}
+res_sig_time <- maaslin_res_time[maaslin_res_time$qval<0.05,]
+
+write_csv(res_sig_time, file = "K9_FMTStability_maaslinTime_sigRes.csv")
+
+sig_time_names <- unique(res_sig_time$feature)
+
+unique(res_sig_time$GS)
+```
+
+```{r}
+res_sig_time <- data.frame(read.csv("K9_FMTStability_maaslinTime_sigRes.csv"))
+sig_time_names <- unique(res_sig_time$feature)
+
+length(sig_time_names)
+```
+
+**Which unique species were significantly variable with storage time?**
+
+```{r}
+kable(taxa[rownames(taxa) %in% sig_time_names, c(9, 8)], row.names = FALSE, 
+      caption = "Features that Varied Significantly with Time")
+```
+
+**View inferential statistics**
+
+```{r}
+kable(res_sig_time[, c(17:18, 3:8)] %>% arrange(reference, value, coef, qval), row.names = FALSE, 
+      caption = "Features that Varied Significantly with Temperature")
+```
+
+## **Storage Temperature**
+
+```{r, eval=F}
+#subset for -20 vs -80 contrast
+remove <- grep("NA", rownames(asv_maaslin))
+
+maaslin_temp80_t0 <- Maaslin2(
+  input_data = asv_maaslin[-remove, ], 
+  input_metadata = sam_maaslin[sam_maaslin$Temperature != "Fresh", ], 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_output_2", 
+  fixed_effects =  c("Time", "Temperature"),
+  random_effects = "name", 
+  max_significance = 0.7,
+  reference = c("Time,month_0;Temperature,minus_80C")
+  )
+
+res_maaslin6 <- data.frame(maaslin_temp80_t0$results, check.names = F)
+res_maaslin6$feature <- gsub("X", "", res_maaslin6$feature)
+
+```
+
+```{r, eval=F}
+res_maaslin_temp <- res_maaslin[res_maaslin$metadata == "Temperature", ]
+res_maaslin_temp$reference <- "Fresh"
+
+res_maaslin_temp2 <- res_maaslin6[res_maaslin6$metadata == "Temperature", ]
+res_maaslin_temp2$reference <- "minus_80C"
+
+res_maaslin_temp <- data.frame(rbind(res_maaslin_temp, res_maaslin_temp2))
+
+res_maaslin_temp$Phylum <- taxa$Phylum[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$Class <- taxa$Class[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$Order <- taxa$Order[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$Family <- taxa$Family[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$Genus <- taxa$Genus[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$Species <- taxa$Species[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$GS <- taxa$GS[match(res_maaslin_temp$feature, rownames(taxa))]
+res_maaslin_temp$SubSpecies <- taxa$Subspecies[match(res_maaslin_temp$feature, rownames(taxa))]
+
+res_maaslin_temp <- res_maaslin_temp[, c(1:2, 11, 3:6, 8, 9:10, 12:19)]
+```
+
+**Which unique species were significantly variable with storage temperature?**
+
+```{r, eval=F}
+res_sig_temp <- res_maaslin_temp[res_maaslin_temp$qval < 0.05, ]
+
+
+write_csv(res_sig_temp, file = "K9_FMTStability_maaslinTemp_sigRes.csv")
+
+```
+
+```{r}
+res_sig_temp <- data.frame(read.csv("K9_FMTStability_maaslinTemp_sigRes.csv"))
+sig_temp_names <- unique(res_sig_temp$feature)
+
+
+
+```
+
+```{r}
+kable(taxa[rownames(taxa) %in% sig_temp_names, c(9, 8)], row.names = FALSE, 
+      caption = "Features that Varied Significantly with Temperature")
+```
+
+**View interential statistics**
+
+```{r}
+kable(res_sig_temp[, c(17:18, 3:8)] %>% arrange(reference, coef, qval), row.names = FALSE, 
+      caption = "Features that Varied Significantly with Temperature")
+```
+
+**Which featuers were significantly variable with respect to both time and temperature?**
+
+```{r}
+names_sig_intersect <- intersect(sig_temp_names, sig_time_names)
+
+kable(taxa[rownames(taxa) %in% names_sig_intersect, c(9, 8)], row.names = FALSE, 
+      caption = "Features that Varied Significantly with Time and Temperature")
+```
+
+## **Visualize significant results**
+
+**Boxplots:**
+
+```{r}
+names_sig_all <- unique(c(sig_temp_names, sig_time_names))
+```
+
+
+```{r, fig.align = 'center'}
+
+asv_sig <- asv_maaslin[, names_sig_all]
+
+#add trivially small pseudocount for log-transformation
+asv_sig <- asv_sig+1
+asv_sig <- normalize(asv_sig, method = "TSS")
+
+asv_sig <- asin(sqrt(asv_sig))
+
+asv_sig$Temperature <- samdata$Temperature[match(rownames(asv_sig), rownames(samdata))]
+
+asv_sig$Time <- samdata$Time[match(rownames(asv_sig),
+                                                   rownames(samdata))]
+
+asv_sig$name <- samdata$name[match(rownames(asv_sig), rownames(samdata))]
+
+asv_sig$Temperature <- as.factor(asv_sig$Temperature)
+
+asv_sig$Time <- as.factor(asv_sig$Time)
+
+
+colnames(asv_sig)[1:19] <- taxa$GS[match(colnames(asv_sig)[1:19], rownames(taxa))]
+
+
+```
+
+
+```{r}
+asv_sig_asv <- asv_sig
+
+colnames <- colnames(asv_sig_asv[1:19])
+
+
+```
+
+
+```{r}
+
+plt_sigbox <- NULL
+for (i in colnames) {
+  plt <- ggboxplot(asv_sig_asv, x = "Time", y = i, 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) +
+    geom_jitter() +
+  theme(legend.position="bottom") + ggtitle("Significant Features in Maaslin2 Model (TSS, AST)")
+  
+  plt_sigbox <- plt
+  print(plt)
+  
+}
+```
+
+```{r}
+
+pdf("SFile_sigBoxplots.pdf", onefile = TRUE)
+for (i in colnames) {
+  plt <- ggboxplot(asv_sig_asv, x = "Time", y = i, 
+                   fill = "Temperature", 
+                   palette = c("#00AFBB", "#E7B800", "#FC4E07")) +
+    geom_jitter() +
+  theme(legend.position="bottom") + ggtitle("Significant Features in Maaslin2 Model (TSS, AST)")
+    print(plt)
+  
+}
+dev.off()
+
+```
+
+
+## **Differential Abundance between Fresh Fecal Samples with Low and High Beta Dispersion**
+
+```{r}
+asv_beta <- data.frame(otu_table(subset_samples(physeq_filt_glom, 
+                                                Temperature == "Fresh" & 
+                                                  !is.na(Time))), 
+                       check.names = F)
+
+sam_beta<- data.frame(sam_data(subset_samples(physeq_filt_glom, 
+                                                Temperature == "Fresh" & 
+                                                  !is.na(Time))))
+
+sam_beta$BetaDispersion <- group_dist$BetaDispersion[match(sam_beta$name, rownames(group_dist))]
+```
+
+```{r}
+
+sam_beta$BetaDispersion <- factor(sam_beta$BetaDispersion, levels = c("Low Dispersion", "High Dispersion"))
+
+maaslin_BetaDispersion <- Maaslin2(
+  input_data = asv_beta, 
+  input_metadata = sam_beta, 
+  normalization = "TSS",
+  transform = "AST",
+  output = "maaslin2_beta", 
+  fixed_effects =  c("BetaDispersion"),
+  max_significance = 0.7
+  )
+
+res_maaslin_beta <- data.frame(maaslin_BetaDispersion$results, check.names = F)
+res_maaslin_beta$feature <- gsub("X", "", res_maaslin_beta$feature)
+
+res_maaslin_beta$Phylum <- taxa$Phylum[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$Class <- taxa$Class[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$Order <- taxa$Order[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$Family <- taxa$Family[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$Genus <- taxa$Genus[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$Species <- taxa$Species[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$GS <- taxa$GS[match(res_maaslin_beta$feature, rownames(taxa))]
+res_maaslin_beta$SubSpecies <- taxa$Subspecies[match(res_maaslin_beta$feature, rownames(taxa))]
+
+res_maaslin_beta <- res_maaslin_beta[, c(1:2, 11, 3:6, 8, 9:10, 12:18)]
+
+
+```
+
+
+
